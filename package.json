@@ -1,6 +1,7 @@
 {
   "name": "mqtt-smartthings-bridge",
   "version": "1.0.0",
+  "description": "Bridge between MQTT and SmartThings",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,5 +10,8 @@
     "mqtt": "^5.3.0",
     "express": "^4.18.2",
     "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
