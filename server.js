@@ -28,6 +28,9 @@ console.log('=== MQTT-SmartThings Bridge ===');
 console.log(`MQTT Broker: ${MQTT_BROKER}:${MQTT_PORT}`);
 console.log(`MQTT Username: ${MQTT_USERNAME}`);
 console.log(`SmartThings configured: ${SMARTTHINGS_TOKEN ? 'Yes' : 'No'}`);
+if (SMARTTHINGS_DEVICE_ID) {
+    console.log(`SmartThings Device ID: ${SMARTTHINGS_DEVICE_ID}`);
+}
 
 // Connect to MQTT broker
 const mqttClient = mqtt.connect(`mqtts://${MQTT_BROKER}:${MQTT_PORT}`, {
@@ -79,15 +82,25 @@ mqttClient.on('message', async (topic, message) => {
         // Update SmartThings device if configured
         if (SMARTTHINGS_TOKEN && SMARTTHINGS_DEVICE_ID) {
             try {
-                await axios.post(
-                    `https://api.smartthings.com/v1/devices/${SMARTTHINGS_DEVICE_ID}/commands`,
-                    {
-                        commands: [{
+                // Normalize the command - SmartThings expects lowercase "on" or "off"
+                const command = payload.toLowerCase() === 'on' ? 'on' : 'off';
+
+                const requestBody = {
+                    commands: [
+                        {
                             component: 'main',
                             capability: 'switch',
-                            command: payload.toLowerCase()
-                        }]
-                    },
+                            command: command,
+                            arguments: []  // Required - must be empty array for on/off commands
+                        }
+                    ]
+                };
+
+                console.log('📤 Sending to SmartThings:', JSON.stringify(requestBody, null, 2));
+
+                const response = await axios.post(
+                    `https://api.smartthings.com/v1/devices/${SMARTTHINGS_DEVICE_ID}/commands`,
+                    requestBody,
                     {
                         headers: {
                             'Authorization': `Bearer ${SMARTTHINGS_TOKEN}`,
@@ -95,10 +108,21 @@ mqttClient.on('message', async (topic, message) => {
                         }
                     }
                 );
-                console.log(`✓ Updated SmartThings: ${payload}`);
+
+                console.log(`✓ Updated SmartThings: ${command}`);
+                console.log('✓ Response:', JSON.stringify(response.data, null, 2));
+
             } catch (error) {
-                console.error('✗ SmartThings update failed:', error.response?.data || error.message);
+                console.error('✗ SmartThings update failed');
+                console.error('Error details:', JSON.stringify(error.response?.data, null, 2) || error.message);
+
+                if (error.response) {
+                    console.error('Status:', error.response.status);
+                    console.error('Status Text:', error.response.statusText);
+                }
             }
+        } else {
+            console.log('⚠ SmartThings not configured (TOKEN or DEVICE_ID missing)');
         }
     } else if (topic === MQTT_TOPIC_AVAILABILITY) {
         console.log(`📡 NodeMCU status: ${payload}`);
@@ -114,10 +138,114 @@ app.get('/', (req, res) => {
             broker: MQTT_BROKER
         },
         smartthings: {
-            configured: !!(SMARTTHINGS_TOKEN && SMARTTHINGS_DEVICE_ID)
+            configured: !!(SMARTTHINGS_TOKEN && SMARTTHINGS_DEVICE_ID),
+            token_present: !!SMARTTHINGS_TOKEN,
+            device_id_present: !!SMARTTHINGS_DEVICE_ID
         },
         uptime: process.uptime()
     });
+});
+
+// Test SmartThings connection and get device info
+app.get('/test-smartthings', async (req, res) => {
+    if (!SMARTTHINGS_TOKEN || !SMARTTHINGS_DEVICE_ID) {
+        return res.status(400).json({
+            error: 'SmartThings not configured',
+            token_set: !!SMARTTHINGS_TOKEN,
+            device_id_set: !!SMARTTHINGS_DEVICE_ID
+        });
+    }
+
+    try {
+        // Get device info
+        const response = await axios.get(
+            `https://api.smartthings.com/v1/devices/${SMARTTHINGS_DEVICE_ID}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${SMARTTHINGS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        res.json({
+            success: true,
+            device: {
+                deviceId: response.data.deviceId,
+                name: response.data.name,
+                label: response.data.label,
+                type: response.data.type,
+                manufacturerName: response.data.manufacturerName,
+                components: response.data.components
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.response?.data || error.message,
+            device_id_used: SMARTTHINGS_DEVICE_ID,
+            status: error.response?.status
+        });
+    }
+});
+
+// Test sending a command to SmartThings
+app.post('/test-command', async (req, res) => {
+    const { command } = req.body; // "on" or "off"
+
+    if (!SMARTTHINGS_TOKEN || !SMARTTHINGS_DEVICE_ID) {
+        return res.status(400).json({ error: 'SmartThings not configured' });
+    }
+
+    if (!command || !['on', 'off'].includes(command.toLowerCase())) {
+        return res.status(400).json({ error: 'Command must be "on" or "off"' });
+    }
+
+    try {
+        const requestBody = {
+            commands: [
+                {
+                    component: 'main',
+                    capability: 'switch',
+                    command: command.toLowerCase(),
+                    arguments: []  // Required - must be empty array
+                }
+            ]
+        };
+
+        console.log('Testing SmartThings command:', requestBody);
+
+        const response = await axios.post(
+            `https://api.smartthings.com/v1/devices/${SMARTTHINGS_DEVICE_ID}/commands`,
+            requestBody,
+            {
+                headers: {
+                    'Authorization': `Bearer ${SMARTTHINGS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        res.json({
+            success: true,
+            command: command.toLowerCase(),
+            response: response.data
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.response?.data || error.message,
+            request_body: {
+                commands: [{
+                    component: 'main',
+                    capability: 'switch',
+                    command: command.toLowerCase()
+                }]
+            }
+        });
+    }
 });
 
 // Webhook endpoint for SmartThings to control NodeMCU
@@ -184,6 +312,9 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`✓ Server running on port ${PORT}`);
     console.log(`📡 Webhook URL: http://localhost:${PORT}/control`);
+    console.log(`🔍 Test endpoints:`);
+    console.log(`   - GET  /test-smartthings - Check device info`);
+    console.log(`   - POST /test-command - Test SmartThings command`);
 });
 
 // Graceful shutdown
